@@ -124,7 +124,18 @@ The full breadboard wiring diagram (with numbered wires and positions) is in a s
   - Protothreads header (the course version, `pt_cornell_rp2040_*.h`).
   - Copy these files from the course website or Lab code into `server/lib/`. **Do not rewrite their APIs from memory**; when unsure, the actual file contents are authoritative.
   - The one allowed edit: switch the VGA driver to single buffering (see Section 9).
-- Networking: lwIP, linking `pico_cyw43_arch_lwip_threadsafe_background`.
+- Networking: lwIP, linking `pico_cyw43_arch_lwip_threadsafe_background`. The lwIP options live in `client/shared/lwipopts.h` (UDP only; TCP, DHCP, and DNS off, since both ends use static IPs).
+- Toolchain: the Raspberry Pi Pico VS Code extension with SDK 2.3.1 and toolchain 15_2_Rel1 under `~/.pico-sdk`. `client/` and `server/` are separate CMake projects, each with its own `.vscode/`; open one of them (not the repo root) as the VS Code workspace. To build from a terminal:
+
+  ```bash
+  export PICO_SDK_PATH=~/.pico-sdk/sdk/2.3.1
+  export PATH=~/.pico-sdk/toolchain/15_2_Rel1/bin:~/.pico-sdk/cmake/v4.3.4/bin:~/.pico-sdk/ninja/v1.13.2:$PATH
+  cd client   # or server
+  cmake -S . -B build -G Ninja && ninja -C build
+  ```
+
+  The output is `build/skisim_client.uf2` (or `build/skisim_server.uf2`).
+- Serial output goes to both USB and UART0 (GP0 TX / GP1 RX, 115200 baud).
 - Numerics: use the course's `fix15` fixed-point format for filtering and game physics (the RP2040 has no hardware FPU). The `atan2` that converts accelerometer readings to an angle runs once per sample and may use float.
 
 ---
@@ -204,8 +215,10 @@ SkiSim/
 ├── client/                    board unit (the Phase 2 Pico W)
 │   ├── CMakeLists.txt
 │   ├── pico_sdk_import.cmake
+│   ├── .vscode/               Pico VS Code extension settings
 │   ├── shared/                code the server also uses; the only copy
 │   │   ├── protocol.h         packet format, ports, SSID, etc.
+│   │   ├── lwipopts.h         lwIP configuration for both boards
 │   │   ├── fix15.h            fixed-point macros
 │   │   ├── mpu6050.c / .h     I2C read/write, initialization
 │   │   └── tilt_filter.c / .h gyro bias, complementary filter
@@ -214,6 +227,7 @@ SkiSim/
 │       ├── net_client.c / .h  join AP, send UDP, answer pings, reconnect
 │       └── config.h           axes, α, pins
 └── server/                    host
+    ├── .vscode/               Pico VS Code extension settings
     ├── CMakeLists.txt         selects the sensor source via SKI_SOURCE; references ../client/shared
     ├── pico_sdk_import.cmake
     ├── lib/                   course VGA driver, .pio files, protothreads (copied as is)

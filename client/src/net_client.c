@@ -1,0 +1,120 @@
+#include "net_client.h"
+
+#include <stdio.h>
+#include "pico/stdlib.h"
+#include "pico/cyw43_arch.h"
+#include "lwip/netif.h"
+#include "lwip/ip4_addr.h"
+
+#include "protocol.h"
+
+// How long one join attempt may take before we start a new one
+#define JOIN_TIMEOUT_MS   10000
+// How often the link state is checked
+#define POLL_INTERVAL_MS  250
+
+static bool joining = false;
+static bool connected = false;
+static absolute_time_t join_started;
+static absolute_time_t next_poll;
+
+static const char *link_status_name(int status) {
+    switch (status) {
+        case CYW43_LINK_DOWN:    return "down";
+        case CYW43_LINK_JOIN:    return "joining";
+        case CYW43_LINK_NOIP:    return "joined, no IP";
+        case CYW43_LINK_UP:      return "up";
+        case CYW43_LINK_FAIL:    return "failed";
+        case CYW43_LINK_NONET:   return "AP not found";
+        case CYW43_LINK_BADAUTH: return "bad password";
+        default:                 return "unknown";
+    }
+}
+
+// Give the station interface its static address. With LWIP_DHCP=0 the
+// driver leaves it at 0.0.0.0, and the link never reports "up" until set.
+static void set_static_ip(void) {
+    ip4_addr_t ip, mask, gw;
+    ip4addr_aton(SKI_CLIENT_IP, &ip);
+    ip4addr_aton(SKI_NETMASK, &mask);
+    ip4addr_aton(SKI_SERVER_IP, &gw);
+
+    cyw43_arch_lwip_begin();
+    netif_set_addr(&cyw43_state.netif[CYW43_ITF_STA], &ip, &mask, &gw);
+    cyw43_arch_lwip_end();
+}
+
+static void start_join(void) {
+    printf("[net] joining \"%s\" ...\n", SKI_WIFI_SSID);
+    int err = cyw43_arch_wifi_connect_async(SKI_WIFI_SSID, SKI_WIFI_PASSWORD,
+                                            CYW43_AUTH_WPA2_AES_PSK);
+    if (err) {
+        printf("[net] join request failed (%d)\n", err);
+    }
+    joining = true;
+    join_started = get_absolute_time();
+}
+
+int net_client_init(void) {
+    if (cyw43_arch_init_with_country(CYW43_COUNTRY_USA)) {
+        printf("[net] wireless chip init failed\n");
+        return 1;
+    }
+    cyw43_arch_enable_sta_mode();
+    set_static_ip();
+
+    next_poll = get_absolute_time();
+    start_join();
+    return 0;
+}
+
+void net_client_poll(void) {
+    if (absolute_time_diff_us(get_absolute_time(), next_poll) > 0) {
+        return;
+    }
+    next_poll = make_timeout_time_ms(POLL_INTERVAL_MS);
+
+    cyw43_arch_lwip_begin();
+    int status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+    cyw43_arch_lwip_end();
+
+    if (status == CYW43_LINK_UP) {
+        if (!connected) {
+            connected = true;
+            joining = false;
+#if SKI_WIFI_POWERSAVE_OFF
+            // Applied after every join, since joining can restore the default.
+            cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
+#endif
+            printf("[net] connected: IP %s, server %s, power save %s\n",
+                   SKI_CLIENT_IP, SKI_SERVER_IP,
+                   SKI_WIFI_POWERSAVE_OFF ? "off" : "on");
+        }
+        return;
+    }
+
+    if (connected) {
+        connected = false;
+        printf("[net] link lost (%s)\n", link_status_name(status));
+        start_join();
+        return;
+    }
+
+    if (joining) {
+        bool failed = (status == CYW43_LINK_FAIL || status == CYW43_LINK_NONET ||
+                       status == CYW43_LINK_BADAUTH);
+        bool timed_out = absolute_time_diff_us(join_started, get_absolute_time())
+                         > (int64_t)JOIN_TIMEOUT_MS * 1000;
+        if (failed || timed_out) {
+            printf("[net] join %s (%s), retrying\n",
+                   timed_out ? "timed out" : "failed", link_status_name(status));
+            start_join();
+        }
+    } else {
+        start_join();
+    }
+}
+
+bool net_client_is_connected(void) {
+    return connected;
+}
