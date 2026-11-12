@@ -50,3 +50,18 @@ pico_enable_stdio_usb(skisim_client 1)
 pico_enable_stdio_uart(skisim_client 1)
 
 pico_add_extra_outputs(skisim_client)
+
+# ------------------------------------------------------------------------
+# Standalone hardware check: LED, WiFi scan, I2C scan, raw MPU6050 readout.
+# Flash build/skisim_hw_check.uf2 to test the client board on its own.
+add_executable(skisim_hw_check test/hw_check.c)
+target_include_directories(skisim_hw_check PRIVATE ${SKI_SHARED_DIR})
+target_link_libraries(skisim_hw_check
+    pico_stdlib
+    pico_bootsel_via_double_reset
+    pico_cyw43_arch_none
+    hardware_i2c
+)
+pico_enable_stdio_usb(skisim_hw_check 1)
+pico_enable_stdio_uart(skisim_hw_check 1)
+pico_add_extra_outputs(skisim_hw_check)

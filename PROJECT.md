@@ -226,6 +226,8 @@ SkiSim/
 │       ├── main.c             init, 500 Hz sampling, send every 10 ms
 │       ├── net_client.c / .h  join AP, send UDP, answer pings, reconnect
 │       └── config.h           axes, α, pins
+│   └── test/
+│       └── hw_check.c         standalone board check: LED, WiFi scan, I2C scan, raw MPU6050
 └── server/                    host
     ├── .vscode/               Pico VS Code extension settings
     ├── CMakeLists.txt         selects the sensor source via SKI_SOURCE; references ../client/shared
