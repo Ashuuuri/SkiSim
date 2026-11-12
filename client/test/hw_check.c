@@ -69,6 +69,35 @@ static void wifi_scan(void) {
                        : "not seen (fine if the server is not running)");
 }
 
+// ------------------------------------------------------------- line check
+// The MPU6050 breakout has its own pull-up resistors on SDA and SCL. With a
+// weak internal pull-down on the Pico side, a pin wired to a powered sensor
+// reads HIGH, while an unconnected pin reads LOW. This shows which GPIOs the
+// I2C wires actually land on, without trusting labels or photos.
+static void line_check(void) {
+    // Every user GPIO except UART0 (GP0/GP1); GP23-25 and GP29 are wireless-chip pins.
+    static const uint pins[] = { 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+                                 15, 16, 17, 18, 19, 20, 21, 22, 26, 27, 28 };
+    printf("\n[line] pins pulled HIGH by the sensor (pull-down test):\n");
+    int high = 0;
+    for (size_t i = 0; i < sizeof pins / sizeof pins[0]; i++) {
+        uint p = pins[i];
+        gpio_init(p);
+        gpio_set_dir(p, GPIO_IN);
+        gpio_pull_down(p);
+        sleep_us(200);
+        if (gpio_get(p)) {
+            printf("  GP%u is HIGH\n", p);
+            high++;
+        }
+        gpio_disable_pulls(p);
+        gpio_deinit(p);
+    }
+    if (high == 0) {
+        printf("  none. The sensor is probably unpowered, or no I2C wire reaches the Pico.\n");
+    }
+}
+
 // ----------------------------------------------------------------- I2C scan
 static void i2c_setup(pin_pair_t p) {
     i2c_init(I2C_PORT, I2C_BAUD);
@@ -172,6 +201,7 @@ int main(void) {
     cyw43_arch_enable_sta_mode();
 
     wifi_scan();
+    line_check();
 
     int hit = -1;
     for (int i = 0; i < (int)(sizeof candidates / sizeof candidates[0]); i++) {
