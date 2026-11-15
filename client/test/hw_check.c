@@ -408,6 +408,12 @@ int main(void) {
     }
 
     if (hit < 0) {
+        printf("\n[soft] hardware scan found nothing; software scan of both "
+               "orientations:\n");
+        for (int i = 0; i < (int)(sizeof candidates / sizeof candidates[0]); i++) {
+            soft_scan(candidates[i]);
+            soft_scan((pin_pair_t){ candidates[i].scl, candidates[i].sda });
+        }
         printf("\n[mpu] FAIL: no MPU6050 at 0x68 on GP8/GP9 or GP16/GP17.\n"
                "      Check VIN/GND, and that SDA and SCL are not swapped.\n");
         while (true) { blink(); sleep_ms(1000); }   // slow blink = failed
