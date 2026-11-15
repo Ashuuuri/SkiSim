@@ -26,8 +26,8 @@ project(skisim_server C CXX ASM)
 
 pico_sdk_init()
 
-# Shared code lives only in the client tree; reference it, do not copy it.
-set(SKI_SHARED_DIR ${CMAKE_CURRENT_LIST_DIR}/../client/shared)
+# Shared code lives only in the board tree; reference it, do not copy it.
+set(SKI_SHARED_DIR ${CMAKE_CURRENT_LIST_DIR}/../board/shared)
 
 # Sensor source: UDP (default) or LOCAL (wired fallback, not implemented yet)
 set(SKI_SOURCE UDP CACHE STRING "Sensor source: UDP or LOCAL")

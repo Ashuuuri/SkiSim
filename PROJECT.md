@@ -5,7 +5,7 @@ Cornell ECE 5730 final project. The player stands on a board that rocks left and
 This document is the single source of truth for development. The code is split into two folders:
 
 - `server/`: **the host**. Drives the VGA monitor, speaker, and rotary encoder, and runs the game.
-- `client/`: **the board unit**. Reads the MPU6050, computes the tilt angle, and sends it to the host over WiFi.
+- `board/`: **the board unit**. Reads the MPU6050, computes the tilt angle, and sends it to the host over WiFi.
 
 ---
 
@@ -124,13 +124,13 @@ The full breadboard wiring diagram (with numbered wires and positions) is in a s
   - Protothreads header (the course version, `pt_cornell_rp2040_*.h`).
   - Copy these files from the course website or Lab code into `server/lib/`. **Do not rewrite their APIs from memory**; when unsure, the actual file contents are authoritative.
   - The one allowed edit: switch the VGA driver to single buffering (see Section 9).
-- Networking: lwIP, linking `pico_cyw43_arch_lwip_threadsafe_background`. The lwIP options live in `client/shared/lwipopts.h` (UDP only; TCP, DHCP, and DNS off, since both ends use static IPs).
-- Toolchain: the Raspberry Pi Pico VS Code extension with SDK 2.3.1 and toolchain 15_2_Rel1 under `~/.pico-sdk`. `client/` and `server/` are separate CMake projects, each with its own `.vscode/`; open one of them (not the repo root) as the VS Code workspace. To build from a terminal:
+- Networking: lwIP, linking `pico_cyw43_arch_lwip_threadsafe_background`. The lwIP options live in `board/shared/lwipopts.h` (UDP only; TCP, DHCP, and DNS off, since both ends use static IPs).
+- Toolchain: the Raspberry Pi Pico VS Code extension with SDK 2.3.1 and toolchain 15_2_Rel1 under `~/.pico-sdk`. `board/` and `server/` are separate CMake projects, each with its own `.vscode/`; open one of them (not the repo root) as the VS Code workspace. To build from a terminal:
 
   ```bash
   export PICO_SDK_PATH=~/.pico-sdk/sdk/2.3.1
   export PATH=~/.pico-sdk/toolchain/15_2_Rel1/bin:~/.pico-sdk/cmake/v4.3.4/bin:~/.pico-sdk/ninja/v1.13.2:$PATH
-  cd client   # or server
+  cd board    # or server
   cmake -S . -B build -G Ninja && ninja -C build
   ```
 
@@ -163,7 +163,7 @@ The full breadboard wiring diagram (with numbered wires and positions) is in a s
 
 - **Sensor source abstraction**: the game calls a single interface to get "latest angle, angular rate, timestamp, valid flag".
   - Default: `source_udp.c`, receives UDP packets (used from Phase 1 on).
-  - Wired fallback: `source_local.c`, calls the IMU and filter modules in `client/shared` directly.
+  - Wired fallback: `source_local.c`, calls the IMU and filter modules in `board/shared` directly.
   - Select with the CMake option `SKI_SOURCE=UDP|LOCAL`; default is `UDP`.
 - **The Phase 1 server** only handles connectivity and data: run the AP, receive packets, print angle and sequence number over serial, run latency measurements. Game, calibration, sound, and encoder below are Phase 2 work.
 - **Calibration**: before starting, ask the player to stand level, lean fully left, and lean fully right, holding each for 1 second. Record the three angles, then normalize the angle to a `steer` value from −1 to +1 with a small dead zone.
@@ -212,7 +212,7 @@ Server handling rules:
 ```
 SkiSim/
 ├── PROJECT.md                 this document
-├── client/                    board unit (the Phase 2 Pico W)
+├── board/                     board unit (the Phase 2 Pico W)
 │   ├── CMakeLists.txt
 │   ├── pico_sdk_import.cmake
 │   ├── .vscode/               Pico VS Code extension settings
@@ -230,7 +230,7 @@ SkiSim/
 │       └── hw_check.c         standalone board check: LED, WiFi scan, I2C scan, raw MPU6050
 └── server/                    host
     ├── .vscode/               Pico VS Code extension settings
-    ├── CMakeLists.txt         selects the sensor source via SKI_SOURCE; references ../client/shared
+    ├── CMakeLists.txt         selects the sensor source via SKI_SOURCE; references ../board/shared
     ├── pico_sdk_import.cmake
     ├── lib/                   course VGA driver, .pio files, protothreads (copied as is)
     └── src/
@@ -248,7 +248,7 @@ SkiSim/
 
 Rules:
 
-- Code shared by both ends lives only in `client/shared/`. The server's CMake references it by relative path; do not make a copy.
+- Code shared by both ends lives only in `board/shared/`. The server's CMake references it by relative path; do not make a copy.
 - Pins, SSID, ports, and filter parameters all live in config headers; do not hard-code them in functions.
 
 ---
@@ -260,7 +260,7 @@ Rules:
 | 1 | Server and client skeletons: blink, USB serial output | Both LEDs blink; serial output appears |
 | 2 | Server runs AP (static IP 192.168.4.1); client connects (192.168.4.2) | Both serial outputs report a successful connection; a laptop can see the `skisim` network |
 | 3 | Client sends test packets (fixed values); server receives and prints them | Server prints increasing `seq` with no or very few gaps |
-| 4 | MPU6050 driver and filter in `client/shared`, running on the client | I2C scan finds 0x68; angle is stable at rest and follows manual tilting |
+| 4 | MPU6050 driver and filter in `board/shared`, running on the client | I2C scan finds 0x68; angle is stable at rest and follows manual tilting |
 | 5 | Client sends the real angle every 10 ms; server receives, drops stale packets, detects timeouts | Tilting the MPU6050 makes the angle on the server's serial output follow in real time |
 | 6 | Latency measurement (ping port 4211) | Latency distribution printed; measured once before and once after disabling power saving for comparison |
 | 7 | Reconnection | Unplug and replug client power; it recovers automatically and the server does not crash |
@@ -296,6 +296,6 @@ Rules:
 ## 11. Open Questions
 
 - DAC pins: the VGA (GP16–GP21) and MPU6050 I2C (GP8/GP9) pins in Section 3.2 have been confirmed against the course `MPU6050_IMU_Demo`. The DAC pins (GP5–GP7) still need to be checked against a course Lab that uses the DAC.
-- The Lab 3 MPU6050 driver (`mpu6050.c/.h`) can move into `client/shared/`, but its I2C pin defines live in `mpu6050.h` and must move to a config header.
+- The Lab 3 MPU6050 driver (`mpu6050.c/.h`) can move into `board/shared/`, but its I2C pin defines live in `mpu6050.h` and must move to a config header.
 - Whether WiFi is allowed for the final project (confirm with the TA).
 - When the second Pico W arrives: Phase 1 needs both boards from the start.
