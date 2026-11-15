@@ -141,20 +141,218 @@ static bool mpu_write(uint8_t reg, uint8_t val) {
     return i2c_write_timeout_us(I2C_PORT, MPU_ADDR, buf, 2, false, 5000) == 2;
 }
 
+// Last I2C return codes, for diagnostics (PICO_ERROR_GENERIC = -1 is a NACK,
+// PICO_ERROR_TIMEOUT = -2 is a stuck or noisy bus).
+static int last_wr_rc, last_rd_rc;
+
 static bool mpu_read(uint8_t reg, uint8_t *dst, size_t n) {
-    if (i2c_write_timeout_us(I2C_PORT, MPU_ADDR, &reg, 1, true, 5000) != 1) return false;
-    return i2c_read_timeout_us(I2C_PORT, MPU_ADDR, dst, n, false, 5000) == (int)n;
+    last_rd_rc = 0;
+    last_wr_rc = i2c_write_timeout_us(I2C_PORT, MPU_ADDR, &reg, 1, true, 5000);
+    if (last_wr_rc != 1) return false;
+    last_rd_rc = i2c_read_timeout_us(I2C_PORT, MPU_ADDR, dst, n, false, 5000);
+    return last_rd_rc == (int)n;
 }
 
-static bool mpu_init(void) {
+// Standard I2C bus recovery (same idea as the Lab 3 demo): if the MPU6050 was
+// left mid-transfer by a Pico reset, it can hold SDA low. Clock SCL by hand
+// until SDA is released, then send a STOP. Returns true if SDA was stuck.
+static void line_set(uint pin, bool high) {
+    if (high) {
+        gpio_set_dir(pin, GPIO_IN);       // released; pull-up makes it high
+    } else {
+        gpio_put(pin, 0);
+        gpio_set_dir(pin, GPIO_OUT);      // driven low
+    }
+    sleep_us(5);
+}
+
+static bool i2c_bus_recover(pin_pair_t p) {
+    i2c_deinit(I2C_PORT);
+    gpio_init(p.sda);
+    gpio_init(p.scl);
+    gpio_pull_up(p.sda);
+    gpio_pull_up(p.scl);
+    line_set(p.sda, true);
+    line_set(p.scl, true);
+    bool stuck = !gpio_get(p.sda);
+    for (int k = 0; k < 9 && !gpio_get(p.sda); k++) {
+        line_set(p.scl, false);
+        line_set(p.scl, true);
+    }
+    // STOP: SDA low -> high while SCL is high
+    line_set(p.scl, false);
+    line_set(p.sda, false);
+    line_set(p.scl, true);
+    line_set(p.sda, true);
+    return stuck;
+}
+
+// --------------------------------------------------------- software I2C
+// Bit-banged I2C that bypasses the RP2040 I2C block entirely. Used only for
+// diagnosis: it shows whether the wiring works, and in which orientation.
+#define SOFT_HALF_US 50    // about 10 kHz, slow on purpose for diagnosis
+
+static bool soft_scl_high(uint scl) {
+    line_set(scl, true);
+    // Wait for the line to actually rise (detects a slave holding SCL low).
+    for (int i = 0; i < 1000; i++) {
+        if (gpio_get(scl)) return true;
+        sleep_us(1);
+    }
+    return false;
+}
+
+static void soft_start(pin_pair_t p) {
+    line_set(p.sda, true);
+    soft_scl_high(p.scl);
+    sleep_us(SOFT_HALF_US);
+    line_set(p.sda, false);
+    sleep_us(SOFT_HALF_US);
+    line_set(p.scl, false);
+}
+
+static void soft_stop(pin_pair_t p) {
+    line_set(p.sda, false);
+    sleep_us(SOFT_HALF_US);
+    soft_scl_high(p.scl);
+    sleep_us(SOFT_HALF_US);
+    line_set(p.sda, true);
+    sleep_us(SOFT_HALF_US);
+}
+
+// Returns true on ACK; *scl_ok goes false if SCL never rose.
+static bool soft_write(pin_pair_t p, uint8_t b, bool *scl_ok) {
+    for (int i = 7; i >= 0; i--) {
+        line_set(p.sda, (b >> i) & 1);
+        sleep_us(SOFT_HALF_US);
+        if (!soft_scl_high(p.scl)) *scl_ok = false;
+        sleep_us(SOFT_HALF_US);
+        line_set(p.scl, false);
+    }
+    line_set(p.sda, true);               // release SDA for ACK
+    sleep_us(SOFT_HALF_US);
+    if (!soft_scl_high(p.scl)) *scl_ok = false;
+    bool ack = !gpio_get(p.sda);
+    sleep_us(SOFT_HALF_US);
+    line_set(p.scl, false);
+    return ack;
+}
+
+static uint8_t soft_read(pin_pair_t p, bool ack, bool *scl_ok) {
+    uint8_t b = 0;
+    line_set(p.sda, true);
+    for (int i = 0; i < 8; i++) {
+        sleep_us(SOFT_HALF_US);
+        if (!soft_scl_high(p.scl)) *scl_ok = false;
+        b = (b << 1) | gpio_get(p.sda);
+        sleep_us(SOFT_HALF_US);
+        line_set(p.scl, false);
+    }
+    line_set(p.sda, !ack);               // ACK = pull low, NACK = release
+    sleep_us(SOFT_HALF_US);
+    if (!soft_scl_high(p.scl)) *scl_ok = false;
+    sleep_us(SOFT_HALF_US);
+    line_set(p.scl, false);
+    line_set(p.sda, true);
+    return b;
+}
+
+static void soft_probe(pin_pair_t p) {
+    i2c_deinit(I2C_PORT);
+    gpio_init(p.sda);
+    gpio_init(p.scl);
+    gpio_pull_up(p.sda);
+    gpio_pull_up(p.scl);
+    line_set(p.sda, true);
+    line_set(p.scl, true);
+
+    bool scl_ok = true;
+    soft_start(p);
+    bool a1 = soft_write(p, MPU_ADDR << 1, &scl_ok);          // address + write
+    bool a2 = a1 && soft_write(p, REG_WHO_AM_I, &scl_ok);    // register
     uint8_t who = 0;
-    if (!mpu_read(REG_WHO_AM_I, &who, 1)) {
+    bool a3 = false;
+    if (a2) {
+        soft_start(p);                                       // repeated start
+        a3 = soft_write(p, (MPU_ADDR << 1) | 1, &scl_ok);    // address + read
+        if (a3) who = soft_read(p, false, &scl_ok);
+    }
+    soft_stop(p);
+    printf("[soft] SDA=GP%u SCL=GP%u: addr+W %s, reg %s, addr+R %s, "
+           "WHO_AM_I=0x%02X, SCL %s\n", p.sda, p.scl,
+           a1 ? "ACK" : "NACK", a2 ? "ACK" : "-", a3 ? "ACK" : "-", who,
+           scl_ok ? "ok" : "HELD LOW (stretching or wiring)");
+    gpio_disable_pulls(p.sda);
+    gpio_disable_pulls(p.scl);
+    gpio_deinit(p.sda);
+    gpio_deinit(p.scl);
+}
+
+static void soft_scan(pin_pair_t p) {
+    i2c_deinit(I2C_PORT);
+    gpio_init(p.sda);
+    gpio_init(p.scl);
+    gpio_pull_up(p.sda);
+    gpio_pull_up(p.scl);
+    line_set(p.sda, true);
+    line_set(p.scl, true);
+    printf("[soft] scan SDA=GP%u SCL=GP%u (idle SDA=%d SCL=%d):", p.sda, p.scl,
+           gpio_get(p.sda), gpio_get(p.scl));
+    int n = 0;
+    for (uint8_t a = 0x08; a < 0x78; a++) {
+        bool scl_ok = true;
+        soft_start(p);
+        bool ack = soft_write(p, a << 1, &scl_ok);
+        soft_stop(p);
+        if (ack) { printf(" 0x%02X", a); n++; }
+    }
+    printf(n ? "\n" : " none\n");
+    gpio_disable_pulls(p.sda);
+    gpio_disable_pulls(p.scl);
+    gpio_deinit(p.sda);
+    gpio_deinit(p.scl);
+}
+
+static bool mpu_init(pin_pair_t p) {
+    printf("\n[soft] software I2C cross-check (bypasses the I2C hardware):\n");
+    soft_scan(p);
+    soft_scan((pin_pair_t){ p.scl, p.sda });
+    soft_probe(p);
+    soft_probe((pin_pair_t){ p.scl, p.sda });   // same wires, roles swapped
+    printf("\n");
+
+    bool stuck = i2c_bus_recover(p);
+    printf("[mpu] bus recovery: SDA was %s; now SDA=%d SCL=%d\n",
+           stuck ? "STUCK LOW" : "free", gpio_get(p.sda), gpio_get(p.scl));
+    i2c_setup(p);
+
+    uint8_t who = 0;
+    bool ok = false;
+    for (int attempt = 1; attempt <= 3 && !ok; attempt++) {
+        ok = mpu_read(REG_WHO_AM_I, &who, 1);
+        if (!ok) {
+            printf("[mpu] WHO_AM_I attempt %d (repeated start) failed: "
+                   "write rc=%d, read rc=%d, SDA=%d SCL=%d\n", attempt,
+                   last_wr_rc, last_rd_rc, gpio_get(p.sda), gpio_get(p.scl));
+            sleep_ms(50);
+        }
+    }
+    if (!ok) {
+        // Alternative: write the register pointer with a STOP, then read.
+        uint8_t reg = REG_WHO_AM_I;
+        int wr = i2c_write_timeout_us(I2C_PORT, MPU_ADDR, &reg, 1, false, 50000);
+        int rd = i2c_read_timeout_us(I2C_PORT, MPU_ADDR, &who, 1, false, 50000);
+        printf("[mpu] WHO_AM_I with STOP in between: write rc=%d, read rc=%d, "
+               "value 0x%02X\n", wr, rd, who);
+        ok = (wr == 1 && rd == 1);
+    }
+    if (!ok) {
         printf("[mpu] FAIL: cannot read WHO_AM_I\n");
         return false;
     }
     printf("[mpu] WHO_AM_I = 0x%02X %s\n", who,
            who == 0x68 ? "(OK)" : "(unexpected, but continuing)");
-    bool ok = mpu_write(REG_PWR_MGMT_1, 0x00)      // wake up
+    ok = mpu_write(REG_PWR_MGMT_1, 0x00)           // wake up
            && mpu_write(REG_ACCEL_CONFIG, 0x00)    // +-2 g
            && mpu_write(REG_GYRO_CONFIG, 0x00)     // +-250 deg/s
            && mpu_write(REG_CONFIG, 0x03);         // DLPF about 44 Hz
@@ -169,7 +367,8 @@ static void mpu_stream(void) {
     while (true) {
         uint8_t b[14];
         if (!mpu_read(REG_ACCEL_XOUT_H, b, sizeof b)) {
-            printf("[mpu] read error #%d\n", ++errors);
+            printf("[mpu] read error #%d (write rc=%d, read rc=%d)\n", ++errors,
+                   last_wr_rc, last_rd_rc);
             sleep_ms(500);
             continue;
         }
@@ -216,7 +415,7 @@ int main(void) {
 
     printf("\n[mpu] found on SDA=GP%u, SCL=GP%u\n", candidates[hit].sda,
            candidates[hit].scl);
-    if (!mpu_init()) {
+    if (!mpu_init(candidates[hit])) {
         while (true) { blink(); sleep_ms(1000); }
     }
     mpu_stream();
