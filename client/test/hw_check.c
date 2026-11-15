@@ -385,6 +385,30 @@ static void mpu_stream(void) {
     }
 }
 
+// Talk to the MPU6050 on GP16/GP17 before any scan touches the bus, first
+// with software I2C, then with the I2C hardware at two speeds.
+static void fresh_probe(void) {
+    pin_pair_t p = { 16, 17 };
+    printf("\n[fresh] first contact, before any scan:\n");
+    soft_probe(p);
+    const uint speeds[] = { 100000, 50000 };
+    for (int i = 0; i < 2; i++) {
+        i2c_init(I2C_PORT, speeds[i]);
+        gpio_set_function(p.sda, GPIO_FUNC_I2C);
+        gpio_set_function(p.scl, GPIO_FUNC_I2C);
+        gpio_pull_up(p.sda);
+        gpio_pull_up(p.scl);
+        uint8_t who = 0;
+        bool ok = mpu_read(REG_WHO_AM_I, &who, 1);
+        printf("[fresh] hardware I2C at %u kHz: %s (write rc=%d, read rc=%d, "
+               "WHO_AM_I=0x%02X)\n", speeds[i] / 1000, ok ? "OK" : "FAIL",
+               last_wr_rc, last_rd_rc, who);
+        i2c_bus_recover(p);   // also deinits I2C
+        gpio_deinit(p.sda);
+        gpio_deinit(p.scl);
+    }
+}
+
 int main(void) {
     stdio_init_all();
     sleep_ms(2000);   // time to open the serial monitor
@@ -399,6 +423,7 @@ int main(void) {
     printf("[led] wireless chip OK, LED should be blinking\n");
     cyw43_arch_enable_sta_mode();
 
+    fresh_probe();
     wifi_scan();
     line_check();
 
