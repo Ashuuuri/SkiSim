@@ -5,6 +5,9 @@
 #include "pico/cyw43_arch.h"
 #include "lwip/netif.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/pbuf.h"
+#include "lwip/udp.h"
+#include <string.h>
 
 #include "protocol.h"
 
@@ -17,6 +20,9 @@ static bool joining = false;
 static bool connected = false;
 static absolute_time_t join_started;
 static absolute_time_t next_poll;
+
+static struct udp_pcb *data_pcb;
+static ip_addr_t server_addr;
 
 static const char *link_status_name(int status) {
     switch (status) {
@@ -62,6 +68,15 @@ int net_client_init(void) {
     }
     cyw43_arch_enable_sta_mode();
     set_static_ip();
+
+    ipaddr_aton(SKI_SERVER_IP, &server_addr);
+    cyw43_arch_lwip_begin();
+    data_pcb = udp_new_ip_type(IPADDR_TYPE_ANY);
+    cyw43_arch_lwip_end();
+    if (!data_pcb) {
+        printf("[net] could not allocate UDP pcb\n");
+        return 2;
+    }
 
     next_poll = get_absolute_time();
     start_join();
@@ -117,4 +132,19 @@ void net_client_poll(void) {
 
 bool net_client_is_connected(void) {
     return connected;
+}
+
+bool net_client_send(const void *data, uint16_t len) {
+    if (!connected) return false;
+
+    cyw43_arch_lwip_begin();
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
+    err_t err = ERR_MEM;
+    if (p) {
+        memcpy(p->payload, data, len);
+        err = udp_sendto(data_pcb, p, &server_addr, SKI_PORT_DATA);
+        pbuf_free(p);
+    }
+    cyw43_arch_lwip_end();
+    return err == ERR_OK;
 }

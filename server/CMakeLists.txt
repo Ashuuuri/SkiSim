@@ -29,9 +29,21 @@ pico_sdk_init()
 # Shared code lives only in the client tree; reference it, do not copy it.
 set(SKI_SHARED_DIR ${CMAKE_CURRENT_LIST_DIR}/../client/shared)
 
+# Sensor source: UDP (default) or LOCAL (wired fallback, not implemented yet)
+set(SKI_SOURCE UDP CACHE STRING "Sensor source: UDP or LOCAL")
+set_property(CACHE SKI_SOURCE PROPERTY STRINGS UDP LOCAL)
+if (SKI_SOURCE STREQUAL "UDP")
+    set(SKI_SOURCE_FILE src/source_udp.c)
+elseif (SKI_SOURCE STREQUAL "LOCAL")
+    message(FATAL_ERROR "SKI_SOURCE=LOCAL is not implemented yet")
+else()
+    message(FATAL_ERROR "SKI_SOURCE must be UDP or LOCAL, got '${SKI_SOURCE}'")
+endif()
+
 add_executable(skisim_server
     src/main.c
     src/net_ap.c
+    ${SKI_SOURCE_FILE}
 )
 
 target_include_directories(skisim_server PRIVATE
