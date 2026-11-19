@@ -47,6 +47,7 @@ target_link_libraries(skisim_client
     pico_cyw43_arch_lwip_threadsafe_background
     pico_multicore
     hardware_i2c
+    hardware_watchdog
 )
 
 # Serial output on both USB and UART0 (GP0 TX / GP1 RX, 115200 baud)
