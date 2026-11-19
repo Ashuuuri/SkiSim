@@ -10,6 +10,7 @@
 #include <string.h>
 #include <math.h>
 #include "pico/stdlib.h"
+#include "pico/stdio_usb.h"
 #include "pico/cyw43_arch.h"
 #include "hardware/i2c.h"
 
@@ -30,10 +31,15 @@
 typedef struct { uint sda, scl; } pin_pair_t;
 static const pin_pair_t candidates[] = { {8, 9}, {16, 17} };
 
+// Diagnostic: 0 = never start the wireless chip, to rule out supply noise
+// from WiFi activity. The LED is driven by the wireless chip, so it stays off.
+#define USE_WIFI_CHIP 1
+
+static bool wifi_up = false;
 static bool led = false;
 static void blink(void) {
     led = !led;
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led);
+    if (wifi_up) cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led);
 }
 
 // ---------------------------------------------------------------- WiFi scan
@@ -313,14 +319,9 @@ static void soft_scan(pin_pair_t p) {
     gpio_deinit(p.scl);
 }
 
-static bool mpu_init(pin_pair_t p) {
-    printf("\n[soft] software I2C cross-check (bypasses the I2C hardware):\n");
-    soft_scan(p);
-    soft_scan((pin_pair_t){ p.scl, p.sda });
-    soft_probe(p);
-    soft_probe((pin_pair_t){ p.scl, p.sda });   // same wires, roles swapped
-    printf("\n");
+static bool mpu_configure(void);
 
+static bool mpu_init(pin_pair_t p) {
     bool stuck = i2c_bus_recover(p);
     printf("[mpu] bus recovery: SDA was %s; now SDA=%d SCL=%d\n",
            stuck ? "STUCK LOW" : "free", gpio_get(p.sda), gpio_get(p.scl));
@@ -352,12 +353,43 @@ static bool mpu_init(pin_pair_t p) {
     }
     printf("[mpu] WHO_AM_I = 0x%02X %s\n", who,
            who == 0x68 ? "(OK)" : "(unexpected, but continuing)");
-    ok = mpu_write(REG_PWR_MGMT_1, 0x00)           // wake up
+    return mpu_configure();
+}
+
+// Diagnostic: 1 = keep the three gyro axes in standby (accelerometer only),
+// which cuts the sensor's supply current by roughly 90%.
+#define GYRO_STANDBY 0
+#define REG_PWR_MGMT_2    0x6C
+
+// Wake the MPU6050 and set ranges. Assumes the I2C bus is already up.
+static bool mpu_configure(void) {
+#if GYRO_STANDBY
+    printf("[mpu] gyro in standby (accelerometer only) for this test\n");
+    if (!mpu_write(REG_PWR_MGMT_2, 0x07)) return false;   // STBY_XG|YG|ZG
+#endif
+    bool ok = mpu_write(REG_PWR_MGMT_1, 0x00)      // wake up
            && mpu_write(REG_ACCEL_CONFIG, 0x00)    // +-2 g
            && mpu_write(REG_GYRO_CONFIG, 0x00)     // +-250 deg/s
            && mpu_write(REG_CONFIG, 0x03);         // DLPF about 44 Hz
     if (!ok) printf("[mpu] FAIL: configuration write\n");
     return ok;
+}
+
+// After waking the sensor, check it is still alive with single-register
+// reads before starting the 14-byte burst reads.
+static void mpu_after_wake_check(void) {
+    sleep_ms(100);   // let the MPU6050 settle after leaving sleep mode
+    for (int i = 1; i <= 5; i++) {
+        uint8_t who = 0, pwr = 0xFF;
+        bool a = mpu_read(REG_WHO_AM_I, &who, 1);
+        int wr1 = last_wr_rc, rd1 = last_rd_rc;
+        bool b = mpu_read(REG_PWR_MGMT_1, &pwr, 1);
+        printf("[wake] check %d: WHO_AM_I %s 0x%02X (rc %d/%d), PWR_MGMT_1 %s 0x%02X "
+               "(rc %d/%d), SDA=%d SCL=%d\n", i, a ? "ok" : "FAIL", who, wr1, rd1,
+               b ? "ok" : "FAIL", pwr, last_wr_rc, last_rd_rc,
+               gpio_get(16), gpio_get(17));
+        sleep_ms(200);
+    }
 }
 
 static void mpu_stream(void) {
@@ -367,8 +399,8 @@ static void mpu_stream(void) {
     while (true) {
         uint8_t b[14];
         if (!mpu_read(REG_ACCEL_XOUT_H, b, sizeof b)) {
-            printf("[mpu] read error #%d (write rc=%d, read rc=%d)\n", ++errors,
-                   last_wr_rc, last_rd_rc);
+            printf("[mpu] read error #%d (write rc=%d, read rc=%d, SDA=%d SCL=%d)\n",
+                   ++errors, last_wr_rc, last_rd_rc, gpio_get(16), gpio_get(17));
             sleep_ms(500);
             continue;
         }
@@ -387,44 +419,68 @@ static void mpu_stream(void) {
 
 // Talk to the MPU6050 on GP16/GP17 before any scan touches the bus, first
 // with software I2C, then with the I2C hardware at two speeds.
-static void fresh_probe(void) {
-    pin_pair_t p = { 16, 17 };
-    printf("\n[fresh] first contact, before any scan:\n");
-    soft_probe(p);
-    const uint speeds[] = { 100000, 50000 };
-    for (int i = 0; i < 2; i++) {
-        i2c_init(I2C_PORT, speeds[i]);
-        gpio_set_function(p.sda, GPIO_FUNC_I2C);
-        gpio_set_function(p.scl, GPIO_FUNC_I2C);
-        gpio_pull_up(p.sda);
-        gpio_pull_up(p.scl);
-        uint8_t who = 0;
-        bool ok = mpu_read(REG_WHO_AM_I, &who, 1);
-        printf("[fresh] hardware I2C at %u kHz: %s (write rc=%d, read rc=%d, "
-               "WHO_AM_I=0x%02X)\n", speeds[i] / 1000, ok ? "OK" : "FAIL",
-               last_wr_rc, last_rd_rc, who);
-        i2c_bus_recover(p);   // also deinits I2C
-        gpio_deinit(p.sda);
-        gpio_deinit(p.scl);
-    }
+// On success the I2C bus is LEFT UP at 100 kHz, so the caller can keep using
+// it without tearing it down (tear-down and re-init seemed to upset the sensor).
+static bool fresh_probe(pin_pair_t p) {
+    printf("\n[fresh] first contact on SDA=GP%u, SCL=GP%u, before any scan:\n",
+           p.sda, p.scl);
+    i2c_init(I2C_PORT, I2C_BAUD);
+    gpio_set_function(p.sda, GPIO_FUNC_I2C);
+    gpio_set_function(p.scl, GPIO_FUNC_I2C);
+    gpio_pull_up(p.sda);
+    gpio_pull_up(p.scl);
+    uint8_t who = 0;
+    bool ok = mpu_read(REG_WHO_AM_I, &who, 1) && who == 0x68;
+    printf("[fresh] hardware I2C at %u kHz: %s (write rc=%d, read rc=%d, "
+           "WHO_AM_I=0x%02X)\n", I2C_BAUD / 1000, ok ? "OK" : "FAIL",
+           last_wr_rc, last_rd_rc, who);
+    if (!ok) i2c_release(p);
+    return ok;
 }
 
 int main(void) {
     stdio_init_all();
-    sleep_ms(2000);   // time to open the serial monitor
+    // Wait until a serial monitor opens the USB port, so the first contact
+    // with the sensor is always captured. The LED blinks while waiting.
+    while (!stdio_usb_connected()) sleep_ms(100);
+    sleep_ms(300);
     printf("\n===== SkiSim client hardware check =====\n");
 
+#if USE_WIFI_CHIP
     if (cyw43_arch_init_with_country(CYW43_COUNTRY_USA)) {
         while (true) {
             printf("[led] FAIL: wireless chip init failed (is PICO_BOARD=pico_w?)\n");
             sleep_ms(1000);
         }
     }
+    wifi_up = true;
     printf("[led] wireless chip OK, LED should be blinking\n");
     cyw43_arch_enable_sta_mode();
+#else
+    printf("[led] wireless chip NOT started for this test (LED stays off)\n");
+#endif
 
-    fresh_probe();
-    wifi_scan();
+    // Fast path: if the sensor answers on its expected pins, go straight to
+    // streaming. The scans below can confuse the MPU6050, so they only run
+    // when this first contact fails.
+    for (int i = (int)(sizeof candidates / sizeof candidates[0]) - 1; i >= 0; i--) {
+        if (fresh_probe(candidates[i])) {
+            printf("\n[mpu] found on SDA=GP%u, SCL=GP%u\n", candidates[i].sda,
+                   candidates[i].scl);
+            if (!mpu_configure()) {
+                while (true) {
+                    printf("[mpu] stopped: configuration write failed (write rc=%d)\n",
+                           last_wr_rc);
+                    blink(); sleep_ms(5000);
+                }
+            }
+            mpu_after_wake_check();
+            mpu_stream();
+        }
+    }
+
+    printf("\n[diag] first contact failed on all pin pairs; running diagnostics\n");
+    if (wifi_up) wifi_scan();
     line_check();
 
     int hit = -1;
@@ -441,13 +497,19 @@ int main(void) {
         }
         printf("\n[mpu] FAIL: no MPU6050 at 0x68 on GP8/GP9 or GP16/GP17.\n"
                "      Check VIN/GND, and that SDA and SCL are not swapped.\n");
-        while (true) { blink(); sleep_ms(1000); }   // slow blink = failed
+        while (true) {   // slow blink = failed
+            printf("[mpu] stopped: no MPU6050 found (see the log above)\n");
+            blink(); sleep_ms(5000);
+        }
     }
 
     printf("\n[mpu] found on SDA=GP%u, SCL=GP%u\n", candidates[hit].sda,
            candidates[hit].scl);
     if (!mpu_init(candidates[hit])) {
-        while (true) { blink(); sleep_ms(1000); }
+        while (true) {
+            printf("[mpu] stopped: found 0x68 in a scan, but WHO_AM_I could not be read\n");
+            blink(); sleep_ms(5000);
+        }
     }
     mpu_stream();
 }
