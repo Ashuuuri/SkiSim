@@ -18,6 +18,12 @@ void tilt_filter_reseed(tilt_filter_t *f) {
     f->seeded = false;
 }
 
+void tilt_filter_set_bias(tilt_filter_t *f, fix15 bias) {
+    f->bias       = bias;
+    f->calibrated = true;
+    f->seeded     = false;
+}
+
 void tilt_filter_update(tilt_filter_t *f, fix15 accel_angle, fix15 gyro_rate) {
     if (!f->calibrated) {
         f->calib_sum += gyro_rate;

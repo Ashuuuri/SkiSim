@@ -11,6 +11,7 @@
 #include "pico/multicore.h"
 #include "pico/sync.h"
 #include "pico/cyw43_arch.h"
+#include "hardware/watchdog.h"
 
 #include "config.h"
 #include "fix15.h"
@@ -44,6 +45,27 @@ static void imu_snapshot(imu_state_t *out) {
 }
 
 // ---------------------------------------------------------------------------
+// Gyro bias kept across watchdog reboots (net_client reboots on a WiFi
+// stall). The watchdog scratch registers survive a watchdog reboot but not a
+// power cycle, so a fresh power-up still calibrates. Scratch 0-3 are free;
+// the SDK uses 4-7.
+// ---------------------------------------------------------------------------
+#define BIAS_MAGIC  0x5B1A5ED0u
+
+static bool saved_bias(fix15 *bias) {
+    if (!watchdog_caused_reboot() || watchdog_hw->scratch[1] != BIAS_MAGIC) {
+        return false;
+    }
+    *bias = (fix15)watchdog_hw->scratch[0];
+    return true;
+}
+
+static void save_bias(fix15 bias) {
+    watchdog_hw->scratch[0] = (uint32_t)bias;
+    watchdog_hw->scratch[1] = BIAS_MAGIC;
+}
+
+// ---------------------------------------------------------------------------
 // core 1: sensor + filter
 // ---------------------------------------------------------------------------
 static void set_imu_error(bool err) {
@@ -71,6 +93,9 @@ static void core1_main(void) {
     };
     tilt_filter_t filter;
     tilt_filter_init(&filter, SKI_FILTER_ALPHA, SKI_SAMPLE_HZ, SKI_GYRO_CAL_SECONDS);
+    fix15 bias;
+    bool bias_saved = saved_bias(&bias);
+    if (bias_saved) tilt_filter_set_bias(&filter, bias);   // no hold-still needed
 
     imu_bring_up(&imu);
 
@@ -88,6 +113,10 @@ static void core1_main(void) {
             fix15 gyro_rate = (fix15)(((int64_t)SKI_GYRO_RATE_RAW(r.gx, r.gy, r.gz) << 15)
                                       / MPU6050_GYRO_LSB_PER_DPS);
             tilt_filter_update(&filter, accel_angle, gyro_rate);
+            if (filter.calibrated && !bias_saved) {
+                save_bias(filter.bias);
+                bias_saved = true;
+            }
 
             critical_section_enter_blocking(&imu_lock);
             imu_state.angle = filter.angle;
@@ -122,7 +151,8 @@ static void core1_main(void) {
 int main(void) {
     stdio_init_all();
     sleep_ms(1500);   // give USB serial time to enumerate so early prints are not lost
-    printf("\n[client] SkiSim client starting\n");
+    printf("\n[client] SkiSim client starting%s\n",
+           watchdog_caused_reboot() ? " (after a watchdog reboot)" : "");
     printf("[client] IMU on I2C SDA=GP%d SCL=GP%d at %d kHz, %d Hz sampling; "
            "hold still %.0f s for gyro calibration\n", SKI_I2C_SDA_PIN,
            SKI_I2C_SCL_PIN, SKI_I2C_BAUD / 1000, SKI_SAMPLE_HZ,

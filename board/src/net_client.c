@@ -21,11 +21,12 @@
 
 // Stall detection. When the server's AP disappears (e.g. the server is
 // re-flashed) the wireless chip can wedge: every send then blocks for about
-// a second and fails, while the network interface still looks "up".
+// a second and fails, while the network interface still looks "up". Leaving
+// and rejoining does not help (those commands stall too), so the only cure
+// is a reboot; main.c keeps the gyro bias across it.
 #define SEND_SLOW_US            50000   // a healthy send takes well under 1 ms
-#define SEND_FAILS_TO_REJOIN    3       // failed or slow sends in a row
+#define SEND_FAILS_TO_REBOOT    2       // failed or slow sends in a row
 #define LINK_DOWN_POLLS         2       // radio says "not joined" this many polls
-#define REJOINS_BEFORE_REBOOT   3       // forced rejoins with no good send between
 
 static bool joining = false;
 static bool connected = false;
@@ -34,9 +35,8 @@ static absolute_time_t next_poll;
 static absolute_time_t join_retry_at;
 
 static int  send_fails_in_row = 0;
-static bool rejoin_requested = false;
+static bool reboot_requested = false;
 static int  link_down_polls = 0;
-static int  rejoins_without_success = 0;
 
 static struct udp_pcb *data_pcb;
 static ip_addr_t server_addr;
@@ -78,22 +78,13 @@ static void start_join(void) {
     join_started = get_absolute_time();
 }
 
-// Drop the association and rejoin from scratch. If that keeps failing to
-// produce a single good send, reboot: a fresh chip always recovers.
+// The radio reports a clean link loss: drop the association and rejoin.
 static void force_rejoin(const char *reason) {
     connected = false;
     joining = false;
     send_fails_in_row = 0;
     link_down_polls = 0;
-    if (++rejoins_without_success > REJOINS_BEFORE_REBOOT) {
-        printf("[net] %s; still stuck after %d rejoins, rebooting\n", reason,
-               REJOINS_BEFORE_REBOOT);
-        sleep_ms(50);                       // let the message out
-        watchdog_reboot(0, 0, 0);
-        while (true) tight_loop_contents();
-    }
-    printf("[net] %s; leaving and rejoining (%d/%d)\n", reason,
-           rejoins_without_success, REJOINS_BEFORE_REBOOT);
+    printf("[net] %s; leaving and rejoining\n", reason);
     cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
     join_retry_at = make_timeout_time_ms(500);
 }
@@ -127,12 +118,11 @@ void net_client_poll(void) {
     }
     next_poll = make_timeout_time_ms(POLL_INTERVAL_MS);
 
-    if (rejoin_requested) {
-        rejoin_requested = false;
-        if (connected) {
-            force_rejoin("sends failing or stalled");
-            return;
-        }
+    if (reboot_requested) {
+        printf("[net] wireless chip stalled (sends failing or slow); rebooting\n");
+        sleep_ms(50);                       // let the message out
+        watchdog_reboot(0, 0, 0);
+        while (true) tight_loop_contents();
     }
 
     cyw43_arch_lwip_begin();
@@ -208,9 +198,8 @@ bool net_client_send(const void *data, uint16_t len) {
     bool slow = absolute_time_diff_us(t0, get_absolute_time()) > SEND_SLOW_US;
     if (err == ERR_OK && !slow) {
         send_fails_in_row = 0;
-        rejoins_without_success = 0;
-    } else if (++send_fails_in_row >= SEND_FAILS_TO_REJOIN) {
-        rejoin_requested = true;            // handled in the next poll
+    } else if (++send_fails_in_row >= SEND_FAILS_TO_REBOOT) {
+        reboot_requested = true;            // handled in the next poll
     }
     return err == ERR_OK;
 }
