@@ -43,11 +43,32 @@ endif()
 add_executable(skisim_server
     src/main.c
     src/net_ap.c
+    src/render.c
+    src/game.c
+    src/audio.c
+    src/input.c
     ${SKI_SOURCE_FILE}
+    lib/vga16_graphics_v3.c     # course VGA driver (it #includes the font files)
+)
+
+# Course VGA PIO programs
+pico_generate_pio_header(skisim_server ${CMAKE_CURRENT_LIST_DIR}/lib/hsync.pio)
+pico_generate_pio_header(skisim_server ${CMAKE_CURRENT_LIST_DIR}/lib/vsync.pio)
+pico_generate_pio_header(skisim_server ${CMAKE_CURRENT_LIST_DIR}/lib/rgb.pio)
+
+# The course VGA driver's PIO timing assumes a 150 MHz system clock
+# (hsync/vsync divide by 6 for 25 MHz). Start the RP2040 at 150 MHz.
+# The SDK supports up to 200 MHz on the RP2040 with the default wireless
+# chip clock divider, so WiFi is expected to keep working; confirm on hardware.
+target_compile_definitions(skisim_server PRIVATE
+    SYS_CLK_KHZ=150000
+    PICO_STACK_SIZE=0x1000          # 4 KB per core (default 2 KB); printf with floats is stack hungry
+    PICO_CORE1_STACK_SIZE=0x1000
 )
 
 target_include_directories(skisim_server PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src
+    ${CMAKE_CURRENT_LIST_DIR}/lib   # course VGA driver and protothreads
     ${SKI_SHARED_DIR}          # also where lwIP finds lwipopts.h
 )
 
@@ -55,6 +76,15 @@ target_link_libraries(skisim_server
     pico_stdlib
     pico_bootsel_via_double_reset
     pico_cyw43_arch_lwip_threadsafe_background
+    pico_multicore
+    pico_sync
+    hardware_pio
+    hardware_dma
+    hardware_irq
+    hardware_sync
+    hardware_clocks
+    hardware_spi                    # MCP4822 DAC
+    hardware_timer                  # audio sample interrupt
 )
 
 # Serial output on both USB and UART0 (GP0 TX / GP1 RX, 115200 baud)
