@@ -212,6 +212,8 @@ Server handling rules:
 ```
 SkiSim/
 ├── PROJECT.md                 this document
+├── tools/
+│   └── imu_viewer/            live tilt viewer: serve.py reads hw_check serial output, index.html animates it
 ├── board/                     board unit (the Phase 2 Pico W)
 │   ├── CMakeLists.txt
 │   ├── pico_sdk_import.cmake

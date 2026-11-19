@@ -392,11 +392,18 @@ static void mpu_after_wake_check(void) {
     }
 }
 
+// 50 Hz is smooth enough for tools/imu_viewer and light on USB serial.
+#define STREAM_PERIOD_MS  20
+
 static void mpu_stream(void) {
-    printf("\n[mpu] streaming at 10 Hz. Tilt the board left/right and watch\n"
-           "      which of roll / pitch changes; that is the axis to use.\n\n");
+    printf("\n[mpu] streaming at %d Hz. Tilt the board left/right and watch\n"
+           "      which of roll / pitch changes; that is the axis to use.\n\n",
+           1000 / STREAM_PERIOD_MS);
     int errors = 0;
+    int n = 0;
+    absolute_time_t next = get_absolute_time();
     while (true) {
+        next = delayed_by_ms(next, STREAM_PERIOD_MS);   // fixed sample times
         uint8_t b[14];
         if (!mpu_read(REG_ACCEL_XOUT_H, b, sizeof b)) {
             printf("[mpu] read error #%d (write rc=%d, read rc=%d, SDA=%d SCL=%d)\n",
@@ -410,10 +417,10 @@ static void mpu_stream(void) {
         float gx = raw[4] / 131.0f,   gy = raw[5] / 131.0f,   gz = raw[6] / 131.0f;
         float roll  = atan2f(ay, az) * 57.2958f;
         float pitch = atan2f(ax, az) * 57.2958f;
-        printf("acc g [%+5.2f %+5.2f %+5.2f]  gyro dps [%+7.1f %+7.1f %+7.1f]  "
+        printf("acc g [%+6.3f %+6.3f %+6.3f]  gyro dps [%+7.1f %+7.1f %+7.1f]  "
                "roll %+6.1f  pitch %+6.1f\n", ax, ay, az, gx, gy, gz, roll, pitch);
-        blink();
-        sleep_ms(100);
+        if (++n % (500 / STREAM_PERIOD_MS) == 0) blink();   // LED toggles twice a second
+        sleep_until(next);
     }
 }
 

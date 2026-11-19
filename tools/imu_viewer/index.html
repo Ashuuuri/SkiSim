@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SkiSim IMU Viewer</title>
+<style>
+/* Layout: board animation on the left, numbers on the right, angle history underneath. */
+:root {
+  --bg: #f2f5f7; --panel: #ffffff; --ink: #15222c; --muted: #5f6f7a; --line: #d5dee5;
+  --board: #8a5a2b; --pivot: #33424d; --accel: #9aa9b4; --filt: #1f6f9f; --gyro: #c2410c;
+  --ok: #1d7a4b; --bad: #b42335; --guide: #e3e9ee;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f171d; --panel: #16212a; --ink: #e6edf2; --muted: #9aabb8; --line: #2a3a46;
+    --board: #c08a52; --pivot: #9aabb8; --accel: #5d6d79; --filt: #6cb4e0; --gyro: #f08a52;
+    --ok: #5cc98e; --bad: #f07a88; --guide: #1f2c36; color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans);
+       padding: 20px max(16px, env(safe-area-inset-right)) 32px max(16px, env(safe-area-inset-left)); }
+.wrap { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+h1 { margin: 0; font-size: 20px; }
+.status { font: 13px var(--mono); color: var(--muted); }
+.status .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--bad); margin-right: 6px; vertical-align: 0; }
+.status.on .dot { background: var(--ok); }
+.grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 16px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-width: 0; }
+canvas { display: block; width: 100%; }
+#board { aspect-ratio: 16 / 10; }
+#chart { aspect-ratio: 16 / 4.5; }
+.big { font: 600 44px var(--mono); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.big small { font-size: 18px; color: var(--muted); }
+.side { font: 600 15px var(--sans); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font: 13px var(--mono); font-variant-numeric: tabular-nums; margin-top: 10px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; text-align: right; }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.sw { display: inline-block; width: 14px; height: 3px; margin-right: 6px; vertical-align: middle; }
+button { font: 500 13px var(--sans); color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+         border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+button:focus-visible { outline: 2px solid var(--filt); outline-offset: 2px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+.note { font-size: 12px; color: var(--muted); }
+#log { font: 12px var(--mono); color: var(--muted); max-height: 110px; overflow: auto; white-space: pre-wrap; margin: 0; }
+@media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>SkiSim IMU Viewer</h1>
+    <div class="status" id="status"><span class="dot"></span>waiting for server…</div>
+  </header>
+
+  <div class="grid">
+    <div class="panel">
+      <canvas id="board" aria-label="Rocking board seen from behind the player"></canvas>
+    </div>
+    <div class="panel">
+      <div class="note">Tilt (complementary filter)</div>
+      <div class="big"><span id="angle">--.-</span><small>°</small></div>
+      <div class="side" id="side">—</div>
+      <dl class="kv">
+        <dt>accel angle</dt><dd id="v-acc">—</dd>
+        <dt>gyro rate</dt><dd id="v-rate">—</dd>
+        <dt>|a|</dt><dd id="v-mag">—</dd>
+        <dt>gyro bias</dt><dd id="v-bias">0.0 °/s</dd>
+        <dt>samples/s</dt><dd id="v-rate-hz">—</dd>
+        <dt>ax ay az (g)</dt><dd id="v-a">—</dd>
+        <dt>gx gy gz (°/s)</dt><dd id="v-g">—</dd>
+      </dl>
+      <div class="row">
+        <button id="btn-cal" type="button">Calibrate gyro (hold still 2 s)</button>
+        <button id="btn-flip" type="button">Flip sign</button>
+      </div>
+      <p class="note">Mapping from the tilt test: angle = atan2(ax, az), rate = −gy, right side down = positive.</p>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="legend">
+      <span><span class="sw" style="background:var(--filt)"></span>filtered angle</span>
+      <span><span class="sw" style="background:var(--accel)"></span>accelerometer only</span>
+      <span><span class="sw" style="background:var(--gyro)"></span>gyro rate ÷ 10</span>
+      <span>last 10 s · dashed lines at ±10° (expected board range)</span>
+    </div>
+    <canvas id="chart" aria-label="Tilt angle over the last 10 seconds"></canvas>
+  </div>
+
+  <div class="panel">
+    <div class="note">Board messages</div>
+    <pre id="log"></pre>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ---- mapping found in the tilt test (keep in sync with board/src/config.h) ----
+  const ALPHA = 0.98;                 // complementary filter weight on the gyro
+  let sign = 1;                       // "Flip sign" toggles this
+  const accelAngle = s => Math.atan2(s.ax, s.az) * 180 / Math.PI;
+  const gyroRate   = s => -s.gy;
+
+  const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const $ = id => document.getElementById(id);
+
+  let filt = null, lastT = null, bias = 0;
+  let calib = null;                   // {until, sum, n} while calibrating
+  const hist = [];                    // {t, acc, filt, rate}
+  let rateCount = 0, rateT = performance.now();
+
+  function onSample(s) {
+    const acc = sign * accelAngle(s);
+    const rate = sign * (gyroRate(s) - bias);
+    if (calib) {
+      calib.sum += gyroRate(s); calib.n++;
+      if (s.t >= calib.until) {
+        bias = calib.sum / calib.n; calib = null;
+        $('btn-cal').textContent = 'Calibrate gyro (hold still 2 s)';
+        $('v-bias').textContent = bias.toFixed(2) + ' °/s';
+      }
+    }
+    if (filt === null || lastT === null || s.t - lastT > 0.5) filt = acc;
+    else {
+      const dt = s.t - lastT;
+      filt = ALPHA * (filt + rate * dt) + (1 - ALPHA) * acc;
+    }
+    lastT = s.t;
+    hist.push({ t: s.t, acc, filt, rate });
+    while (hist.length && s.t - hist[0].t > 10) hist.shift();
+
+    $('angle').textContent = (filt >= 0 ? '+' : '') + filt.toFixed(1);
+    $('side').textContent = Math.abs(filt) < 1 ? 'level'
+      : (filt > 0 ? 'right side down' : 'left side down');
+    $('v-acc').textContent = acc.toFixed(1) + ' °';
+    $('v-rate').textContent = rate.toFixed(1) + ' °/s';
+    $('v-mag').textContent = Math.hypot(s.ax, s.ay, s.az).toFixed(3) + ' g';
+    $('v-a').textContent = [s.ax, s.ay, s.az].map(v => v.toFixed(2)).join('  ');
+    $('v-g').textContent = [s.gx, s.gy, s.gz].map(v => v.toFixed(1)).join('  ');
+    rateCount++;
+  }
+
+  // ---- canvases ----
+  function fit(c) {
+    const r = c.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+    if (c.width !== Math.round(r.width * d)) { c.width = Math.round(r.width * d); c.height = Math.round(r.height * d); }
+    const g = c.getContext('2d'); g.setTransform(d, 0, 0, d, 0, 0);
+    return [g, r.width, r.height];
+  }
+
+  function drawBoard() {
+    const [g, w, h] = fit($('board'));
+    g.clearRect(0, 0, w, h);
+    const cx = w / 2, cy = h * 0.62, L = Math.min(w * 0.78, h * 1.4);
+    // floor
+    g.strokeStyle = css('--line'); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(0, cy + 34); g.lineTo(w, cy + 34); g.stroke();
+    // level reference
+    g.setLineDash([5, 6]); g.strokeStyle = css('--guide'); g.lineWidth = 2;
+    g.beginPath(); g.moveTo(cx - L / 2, cy); g.lineTo(cx + L / 2, cy); g.stroke(); g.setLineDash([]);
+    // pivot
+    g.fillStyle = css('--pivot');
+    g.beginPath(); g.moveTo(cx, cy + 6); g.lineTo(cx - 26, cy + 34); g.lineTo(cx + 26, cy + 34); g.closePath(); g.fill();
+    // board (positive = right side down = clockwise on screen)
+    const a = (filt ?? 0) * Math.PI / 180;
+    g.save(); g.translate(cx, cy); g.rotate(a);
+    g.fillStyle = css('--board');
+    g.fillRect(-L / 2, -10, L, 14);
+    // feet
+    g.fillStyle = css('--ink');
+    [-1, 1].forEach(k => g.fillRect(k * L * 0.28 - 22, -22, 44, 12));
+    g.font = '600 13px ' + css('--sans'); g.textAlign = 'center';
+    g.fillText('L', -L * 0.28, -30); g.fillText('R', L * 0.28, -30);
+    g.restore();
+    // angle label
+    g.fillStyle = css('--muted'); g.font = '13px ' + css('--mono'); g.textAlign = 'left';
+    g.fillText('seen from behind the player', 10, 20);
+  }
+
+  function drawChart() {
+    const [g, w, h] = fit($('chart'));
+    g.clearRect(0, 0, w, h);
+    const pad = 34, top = 8, bot = h - 18, range = 60;   // ±60° shown
+    const y = v => top + (bot - top) * (0.5 - Math.max(-range, Math.min(range, v)) / (2 * range));
+    g.font = '11px ' + css('--mono'); g.fillStyle = css('--muted'); g.textAlign = 'right';
+    [-60, -30, 0, 30, 60].forEach(v => {
+      g.strokeStyle = css('--guide'); g.lineWidth = 1;
+      g.beginPath(); g.moveTo(pad, y(v)); g.lineTo(w, y(v)); g.stroke();
+      g.fillText(v + '°', pad - 6, y(v) + 4);
+    });
+    g.setLineDash([4, 5]); g.strokeStyle = css('--muted');
+    [-10, 10].forEach(v => { g.beginPath(); g.moveTo(pad, y(v)); g.lineTo(w, y(v)); g.stroke(); });
+    g.setLineDash([]);
+    if (!hist.length) return;
+    const tEnd = hist[hist.length - 1].t;
+    const x = t => pad + (w - pad) * (1 - (tEnd - t) / 10);
+    const line = (key, color, scale = 1, width = 2) => {
+      g.strokeStyle = css(color); g.lineWidth = width; g.beginPath();
+      hist.forEach((p, i) => { const X = x(p.t), Y = y(p[key] * scale); i ? g.lineTo(X, Y) : g.moveTo(X, Y); });
+      g.stroke();
+    };
+    line('rate', '--gyro', 0.1, 1.5);
+    line('acc', '--accel', 1, 1.5);
+    line('filt', '--filt', 1, 2.5);
+  }
+
+  function frame() {
+    drawBoard(); drawChart();
+    const now = performance.now();
+    if (now - rateT >= 1000) { $('v-rate-hz').textContent = rateCount; rateCount = 0; rateT = now; }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---- controls ----
+  $('btn-cal').addEventListener('click', () => {
+    if (!lastT) return;
+    calib = { until: lastT + 2, sum: 0, n: 0 };
+    $('btn-cal').textContent = 'Hold still…';
+  });
+  $('btn-flip').addEventListener('click', () => { sign = -sign; filt = null; });
+
+  // ---- data stream ----
+  function log(line) {
+    const el = $('log'); el.textContent += line + '\n';
+    const lines = el.textContent.split('\n'); if (lines.length > 200) el.textContent = lines.slice(-200).join('\n');
+    el.scrollTop = el.scrollHeight;
+  }
+  function setStatus(on, text) {
+    $('status').className = 'status' + (on ? ' on' : '');
+    $('status').innerHTML = '<span class="dot"></span>' + text;
+  }
+  const es = new EventSource('/stream');
+  es.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'sample') onSample(m);
+    else if (m.type === 'log') log(m.line);
+    else if (m.type === 'status') setStatus(m.connected, m.connected ? 'board connected · ' + m.port : 'board not connected' + (m.port ? ' · ' + m.port : ''));
+  };
+  es.onerror = () => setStatus(false, 'viewer server not running');
+})();
+</script>
+</body>
+</html>
