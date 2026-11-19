@@ -32,6 +32,8 @@ set(SKI_SHARED_DIR ${CMAKE_CURRENT_LIST_DIR}/shared)
 add_executable(skisim_client
     src/main.c
     src/net_client.c
+    ${SKI_SHARED_DIR}/mpu6050.c
+    ${SKI_SHARED_DIR}/tilt_filter.c
 )
 
 target_include_directories(skisim_client PRIVATE
@@ -43,6 +45,8 @@ target_link_libraries(skisim_client
     pico_stdlib
     pico_bootsel_via_double_reset
     pico_cyw43_arch_lwip_threadsafe_background
+    pico_multicore
+    hardware_i2c
 )
 
 # Serial output on both USB and UART0 (GP0 TX / GP1 RX, 115200 baud)

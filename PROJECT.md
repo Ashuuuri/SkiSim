@@ -144,13 +144,15 @@ The full breadboard wiring diagram (with numbered wires and positions) is in a s
 
 ### 5.1 Client (board unit)
 
-1. Startup: initialize I2C0 (100 kHz), wake the MPU6050, configure ±2 g, ±250 °/s, and the built-in low-pass filter.
+1. Startup: initialize I2C0 (400 kHz, see Section 9), recover the bus and reset the MPU6050 (a Pico reset does not power-cycle the sensor), wake it, configure ±2 g, ±250 °/s, and the built-in low-pass filter.
 2. Hold still for 2 seconds and average the angular rate to get the gyro bias.
-3. Read the MPU6050 from a **500 Hz** repeating timer and run a complementary filter:
+3. On core 1, read the MPU6050 at a fixed **500 Hz** and run a complementary filter (core 1 rather than a timer interrupt, because re-initialising the sensor after a dropout needs 200 ms of sleeps):
 
-   `angle = α · (angle + (gyro − bias) · dt) + (1 − α) · accel_angle`, where `accel_angle = atan2(a_y, a_z)`, `α ≈ 0.98`, `dt = 2 ms`
+   `angle = α · (angle + (gyro − bias) · dt) + (1 − α) · accel_angle`, `α ≈ 0.98`, `dt = 2 ms`
 
-   Adjust the axes to match how the MPU6050 is actually mounted. Put this in a single config constant; do not scatter it through the code.
+   The axes depend on how the MPU6050 is mounted and live only in `board/src/config.h`. The tilt test on 2026-11-19 (sensor flat, chip up) gave `accel_angle = atan2(a_x, a_z)` and `gyro = −g_y`, with right side down positive. Repeat the test after mounting the sensor under the board: if it hangs upside down, `a_z` flips sign and the mapping changes. `tools/imu_viewer` with the `skisim_hw_check` firmware makes this test visual.
+
+   If an I2C read fails 5 times in a row or returns all zeros (the sensor browned out and restarted asleep), set `flags` bit1, re-initialise the sensor, and re-seed the angle while keeping the gyro bias.
 4. The main loop sends one UDP packet every **10 ms** (format in Section 6) and answers the server's pings.
 5. Reconnect automatically when the connection drops; keep running the filter while disconnected, without interrupting sampling.
 
@@ -282,7 +284,9 @@ Rules:
 - **On the client, the top + rail is battery positive (about 4.5 V)**. The MPU6050 VCC must go to the Pico's 3V3 (pin 36).
 - Turn off the battery holder switch before plugging in USB to flash.
 - Before changing the system clock, confirm WiFi still works; the wireless chip's interface clock is divided down from the system clock.
-- Keep the I2C wires running under the board within 50 cm and use 100 kHz.
+- Keep the I2C wires running under the board within 50 cm. The board unit runs I2C at 400 kHz so a 14-byte read (about 0.4 ms) fits the 2 ms sample period. If long wires cause read errors, set `SKI_I2C_BAUD` to 100000 and `SKI_SAMPLE_HZ` to 250 in `board/src/config.h`.
+- Do not run the I2C wires along GP16/GP17: those pins sit next to the WiFi antenna, and with the radio on the MPU6050 bus locked up there. GP8/GP9 work.
+- Solder the MPU6050 header pins. Unsoldered pins let address scans pass but break longer transfers.
 
 ---
 
@@ -298,6 +302,5 @@ Rules:
 ## 11. Open Questions
 
 - DAC pins: the VGA (GP16–GP21) and MPU6050 I2C (GP8/GP9) pins in Section 3.2 have been confirmed against the course `MPU6050_IMU_Demo`. The DAC pins (GP5–GP7) still need to be checked against a course Lab that uses the DAC.
-- The Lab 3 MPU6050 driver (`mpu6050.c/.h`) can move into `board/shared/`, but its I2C pin defines live in `mpu6050.h` and must move to a config header.
 - Whether WiFi is allowed for the final project (confirm with the TA).
 - When the second Pico W arrives: Phase 1 needs both boards from the start.
