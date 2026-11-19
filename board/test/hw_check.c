@@ -424,11 +424,20 @@ static void mpu_stream(void) {
 static bool fresh_probe(pin_pair_t p) {
     printf("\n[fresh] first contact on SDA=GP%u, SCL=GP%u, before any scan:\n",
            p.sda, p.scl);
+    // A Pico reboot does not power-cycle the sensor, so un-stick the bus and
+    // reset the MPU6050 in software first (same sequence as the Lab 3 demo).
+    bool stuck = i2c_bus_recover(p);
+    if (stuck) printf("[fresh] SDA was stuck low; bus recovered\n");
     i2c_init(I2C_PORT, I2C_BAUD);
     gpio_set_function(p.sda, GPIO_FUNC_I2C);
     gpio_set_function(p.scl, GPIO_FUNC_I2C);
     gpio_pull_up(p.sda);
     gpio_pull_up(p.scl);
+    if (mpu_write(REG_PWR_MGMT_1, 0x80)) {   // full device reset
+        sleep_ms(100);
+        mpu_write(0x68, 0x07);               // SIGNAL_PATH_RESET: gyro, accel, temp
+        sleep_ms(100);
+    }
     uint8_t who = 0;
     bool ok = mpu_read(REG_WHO_AM_I, &who, 1) && who == 0x68;
     printf("[fresh] hardware I2C at %u kHz: %s (write rc=%d, read rc=%d, "
