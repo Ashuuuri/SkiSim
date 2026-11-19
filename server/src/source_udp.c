@@ -15,6 +15,12 @@
 #include "lwip/udp.h"
 
 #include "protocol.h"
+#include "config.h"
+
+// Log queue: filled by the receive callback, drained by the main loop.
+#define LOG_QUEUE_LEN 64
+static sensor_log_entry_t log_queue[LOG_QUEUE_LEN];
+static volatile uint32_t log_head, log_tail;   // head: next write, tail: next read
 
 // A sequence number this far below the last one means the client rebooted
 // and restarted from 0, not that the packet is merely old.
@@ -71,6 +77,29 @@ static void on_packet(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     u->sample.rx_us  = now;
     u->sample.flags  = pkt.flags;
     u->stats.received++;
+
+#if SKI_LOG_ANGLE_EVERY
+    if (pkt.seq % SKI_LOG_ANGLE_EVERY == 0 &&
+        log_head - log_tail < LOG_QUEUE_LEN) {          // drop when full
+        log_queue[log_head % LOG_QUEUE_LEN] = (sensor_log_entry_t){
+            .unit_id = pkt.unit_id, .seq = pkt.seq, .angle = pkt.angle,
+            .rate = pkt.rate, .flags = pkt.flags,
+        };
+        log_head++;
+    }
+#endif
+}
+
+bool sensor_source_next_log(sensor_log_entry_t *out) {
+    bool have = false;
+    cyw43_arch_lwip_begin();
+    if (log_tail != log_head) {
+        *out = log_queue[log_tail % LOG_QUEUE_LEN];
+        log_tail++;
+        have = true;
+    }
+    cyw43_arch_lwip_end();
+    return have;
 }
 
 int sensor_source_init(void) {

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Live IMU viewer bridge for SkiSim.
 
-Reads the board's serial output (the skisim_hw_check firmware prints one
-"acc g [...] gyro dps [...]" line per sample) and pushes each sample to a
-browser page over Server-Sent Events.
+Reads a Pico's serial output and pushes it to a browser page over
+Server-Sent Events. It understands three firmwares:
+  - skisim_hw_check: raw "acc g [...] gyro dps [...]" lines (the page runs
+    its own filter preview)
+  - skisim_client:   "tx unit=.. seq=.. angle=.." lines, the angle it sends
+  - skisim_server:   "rx unit=.. seq=.. angle=.." lines, the angle it received
+Run one copy next to the board and one next to the server to compare.
 
 Usage:
     python3 tools/imu_viewer/serve.py                       # auto-detect the port
@@ -31,6 +35,10 @@ NUM = r"([-+]?\d+(?:\.\d+)?)"
 SAMPLE_RE = re.compile(
     r"acc g \[\s*" + NUM + r"\s+" + NUM + r"\s+" + NUM + r"\s*\]\s+"
     r"gyro dps \[\s*" + NUM + r"\s+" + NUM + r"\s+" + NUM + r"\s*\]"
+)
+# Filtered angle as sent by the board ("tx") or received by the server ("rx")
+ANGLE_RE = re.compile(
+    r"\b(tx|rx) unit=(\d+) seq=(\d+) angle=" + NUM + r" rate=" + NUM + r" flags=(\d+)"
 )
 
 subscribers = []                 # one queue.Queue per open browser tab
@@ -88,8 +96,16 @@ def serial_loop(fixed_path):
                     line = raw.decode("ascii", "replace").strip()
                     if not line:
                         continue
-                    m = SAMPLE_RE.search(line)
-                    if m:
+                    a = ANGLE_RE.search(line)
+                    m = None if a else SAMPLE_RE.search(line)
+                    if a:
+                        broadcast({"type": "angle", "t": time.time(),
+                                   "src": a.group(1), "unit": int(a.group(2)),
+                                   "seq": int(a.group(3)),
+                                   "angle": float(a.group(4)),
+                                   "rate": float(a.group(5)),
+                                   "flags": int(a.group(6))})
+                    elif m:
                         ax, ay, az, gx, gy, gz = (float(v) for v in m.groups())
                         broadcast({"type": "sample", "t": time.time(),
                                    "ax": ax, "ay": ay, "az": az,

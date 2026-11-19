@@ -47,6 +47,10 @@ button { font: 500 13px var(--sans); color: var(--ink); background: var(--bg); b
 button:focus-visible { outline: 2px solid var(--filt); outline-offset: 2px; }
 .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
 .note { font-size: 12px; color: var(--muted); }
+.source { display: inline-block; font: 600 12px var(--mono); letter-spacing: 0.04em; text-transform: uppercase;
+          color: var(--panel); background: var(--muted); padding: 2px 8px; border-radius: 4px; margin-bottom: 8px; }
+.source.tx { background: var(--gyro); }
+.source.rx { background: var(--filt); }
 #log { font: 12px var(--mono); color: var(--muted); max-height: 110px; overflow: auto; white-space: pre-wrap; margin: 0; }
 @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
 </style>
@@ -63,10 +67,12 @@ button:focus-visible { outline: 2px solid var(--filt); outline-offset: 2px; }
       <canvas id="board" aria-label="Rocking board seen from behind the player"></canvas>
     </div>
     <div class="panel">
+      <div class="source" id="source">source: waiting for data</div>
       <div class="note">Tilt (complementary filter)</div>
       <div class="big"><span id="angle">--.-</span><small>°</small></div>
       <div class="side" id="side">—</div>
       <dl class="kv">
+        <dt>packet seq</dt><dd id="v-seq">—</dd>
         <dt>accel angle</dt><dd id="v-acc">—</dd>
         <dt>gyro rate</dt><dd id="v-rate">—</dd>
         <dt>|a|</dt><dd id="v-mag">—</dd>
@@ -116,6 +122,8 @@ button:focus-visible { outline: 2px solid var(--filt); outline-offset: 2px; }
   let rateCount = 0, rateT = performance.now();
 
   function onSample(s) {
+    setSource('raw', 'hw_check · raw sensor');
+    $('v-seq').textContent = '—';
     const acc = sign * accelAngle(s);
     const rate = sign * (gyroRate(s) - bias);
     if (calib) {
@@ -143,6 +151,32 @@ button:focus-visible { outline: 2px solid var(--filt); outline-offset: 2px; }
     $('v-mag').textContent = Math.hypot(s.ax, s.ay, s.az).toFixed(3) + ' g';
     $('v-a').textContent = [s.ax, s.ay, s.az].map(v => v.toFixed(2)).join('  ');
     $('v-g').textContent = [s.gx, s.gy, s.gz].map(v => v.toFixed(1)).join('  ');
+    rateCount++;
+  }
+
+  // Angle already filtered on the Pico: "tx" from the board, "rx" at the server.
+  function setSource(kind, text) {
+    const el = $('source');
+    if (el.dataset.kind === kind) return;
+    el.dataset.kind = kind; el.className = 'source ' + kind; el.textContent = text;
+    $('btn-cal').hidden = kind !== 'raw';
+  }
+  function onAngle(m) {
+    setSource(m.src, m.src === 'tx' ? 'board · angle sent' : 'server · angle received');
+    filt = sign * m.angle;
+    const rate = sign * m.rate;
+    lastT = m.t;
+    hist.push({ t: m.t, acc: NaN, filt, rate });
+    while (hist.length && m.t - hist[0].t > 10) hist.shift();
+    $('angle').textContent = (filt >= 0 ? '+' : '') + filt.toFixed(2);
+    $('side').textContent = Math.abs(filt) < 1 ? 'level'
+      : (filt > 0 ? 'right side down' : 'left side down');
+    $('v-seq').textContent = m.seq + (m.flags & 1 ? '' : '  (calibrating)') + (m.flags & 2 ? '  IMU ERROR' : '');
+    $('v-acc').textContent = '—';
+    $('v-rate').textContent = rate.toFixed(1) + ' °/s';
+    $('v-mag').textContent = '—';
+    $('v-a').textContent = '—';
+    $('v-g').textContent = '—';
     rateCount++;
   }
 
@@ -202,7 +236,12 @@ button:focus-visible { outline: 2px solid var(--filt); outline-offset: 2px; }
     const x = t => pad + (w - pad) * (1 - (tEnd - t) / 10);
     const line = (key, color, scale = 1, width = 2) => {
       g.strokeStyle = css(color); g.lineWidth = width; g.beginPath();
-      hist.forEach((p, i) => { const X = x(p.t), Y = y(p[key] * scale); i ? g.lineTo(X, Y) : g.moveTo(X, Y); });
+      let pen = false;
+      hist.forEach(p => {
+        if (!Number.isFinite(p[key])) { pen = false; return; }
+        const X = x(p.t), Y = y(p[key] * scale);
+        pen ? g.lineTo(X, Y) : g.moveTo(X, Y); pen = true;
+      });
       g.stroke();
     };
     line('rate', '--gyro', 0.1, 1.5);
@@ -240,6 +279,7 @@ button:focus-visible { outline: 2px solid var(--filt); outline-offset: 2px; }
   es.onmessage = e => {
     const m = JSON.parse(e.data);
     if (m.type === 'sample') onSample(m);
+    else if (m.type === 'angle') onAngle(m);
     else if (m.type === 'log') log(m.line);
     else if (m.type === 'status') setStatus(m.connected, m.connected ? 'board connected · ' + m.port : 'board not connected' + (m.port ? ' · ' + m.port : ''));
   };

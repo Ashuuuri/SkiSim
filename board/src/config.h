@@ -45,4 +45,9 @@
 // After an IMU read fails this many times in a row, re-initialise the sensor.
 #define SKI_IMU_MAX_ERRORS  5
 
+// Print a "tx unit=.. seq=.. angle=.." line for every Nth packet sent, for
+// tools/imu_viewer and for comparing with the server's "rx" lines.
+// 2 = 50 lines/s. 0 = off.
+#define SKI_LOG_ANGLE_EVERY 2
+
 #endif // SKISIM_BOARD_CONFIG_H

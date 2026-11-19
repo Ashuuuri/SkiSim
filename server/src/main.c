@@ -58,6 +58,14 @@ int main(void) {
     sensor_stats_t prev[SENSOR_MAX_UNITS] = {0};
 
     while (true) {
+        sensor_log_entry_t e;
+        while (sensor_source_next_log(&e)) {
+            printf("rx unit=%u seq=%lu angle=%+.2f rate=%+.1f flags=%u\n",
+                   e.unit_id, (unsigned long)e.seq,
+                   (double)fix2float15(e.angle), (double)fix2float15(e.rate),
+                   e.flags);
+        }
+
         if (absolute_time_diff_us(get_absolute_time(), next_blink) <= 0) {
             led = !led;
             cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, led);

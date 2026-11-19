@@ -42,4 +42,17 @@ void sensor_source_stats(uint8_t unit_id, sensor_stats_t *out);
 // Packets rejected before reaching any unit (bad length, magic, version, id).
 uint32_t sensor_source_invalid_count(void);
 
+// Accepted samples queued for logging (every SKI_LOG_ANGLE_EVERY-th packet).
+// The receive path cannot print, so the main loop drains this queue.
+typedef struct {
+    uint8_t  unit_id;
+    uint32_t seq;
+    fix15    angle;
+    fix15    rate;
+    uint16_t flags;
+} sensor_log_entry_t;
+
+// Pop the oldest queued entry. Returns false when the queue is empty.
+bool sensor_source_next_log(sensor_log_entry_t *out);
+
 #endif // SKISIM_SENSOR_SOURCE_H

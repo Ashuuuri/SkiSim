@@ -142,7 +142,7 @@ int main(void) {
     absolute_time_t next_blink = get_absolute_time();
     absolute_time_t next_report = make_timeout_time_ms(1000);
     absolute_time_t next_send = get_absolute_time();
-    uint32_t seconds = 0, seq = 0;
+    uint32_t seconds = 0, seq = 0, log_tick = 0;
     uint32_t sent = 0, send_errors = 0;   // counts for the current second
     imu_state_t prev = {0};
 
@@ -154,9 +154,9 @@ int main(void) {
             if (absolute_time_diff_us(get_absolute_time(), next_send) < 0) {
                 next_send = make_timeout_time_us(SKI_SEND_PERIOD_US);
             }
+            imu_state_t s;
+            imu_snapshot(&s);
             if (net_client_is_connected()) {
-                imu_state_t s;
-                imu_snapshot(&s);
                 ski_packet_t pkt = {
                     .magic   = SKI_PKT_MAGIC,
                     .version = SKI_PKT_VERSION,
@@ -170,6 +170,16 @@ int main(void) {
                 if (net_client_send(&pkt, sizeof pkt)) sent++;
                 else send_errors++;
             }
+#if SKI_LOG_ANGLE_EVERY
+            // Logged on its own tick so the viewer keeps moving while the
+            // server is down; seq is the last packet actually sent.
+            if (++log_tick % SKI_LOG_ANGLE_EVERY == 0) {
+                printf("tx unit=%u seq=%lu angle=%+.2f rate=%+.1f flags=%u\n",
+                       SKI_UNIT_BOARD, (unsigned long)seq,
+                       (double)fix2float15(s.angle),
+                       (double)fix2float15(s.rate), s.flags);
+            }
+#endif
         }
 
         if (absolute_time_diff_us(get_absolute_time(), next_blink) <= 0) {
